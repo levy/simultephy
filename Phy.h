@@ -16,12 +16,14 @@
 #ifndef __LTE_PHY_H_
 #define __LTE_PHY_H_
 
+#include "inet/common/packet/chunk/EmptyChunk.h"
 #include "inet/common/packet/Packet.h"
 #include "inet/physicallayer/base/packetlevel/ErrorModelBase.h"
+#include "inet/physicallayer/base/packetlevel/NarrowbandTransmissionBase.h"
 #include "inet/physicallayer/base/packetlevel/ReceiverBase.h"
-#include "inet/physicallayer/base/packetlevel/TransmissionBase.h"
 #include "inet/physicallayer/base/packetlevel/TransmitterBase.h"
 #include "inet/physicallayer/common/packetlevel/Radio.h"
+#include "inet/physicallayer/contract/packetlevel/IRadioSignal.h"
 #include "inet/physicallayer/modulation/Qam64Modulation.h"
 
 namespace lte {
@@ -34,17 +36,22 @@ using namespace inet::physicallayer;
  */
 class ResourceElement {
   protected:
-    const IApskModulation& modulation = Qam64Modulation::singleton; // QPSK, QAM-16, or QAM-64
-    Ptr<const Chunk> contents; // this level of detail could be optional
+    // const IApskModulation &modulation = Qam64Modulation::singleton; // QPSK, QAM-16, or QAM-64
+    Ptr<const Chunk> content; // this level of detail could be optional
 
   public:
+    ResourceElement() {}
+    ResourceElement(const ResourceElement& other) { /*modulation = other.modulation;*/ content = other.content; }
+    void operator=(const ResourceElement& other) { content = other.content; }
+
     static int getNumSubcarriers() { return 1; }
     static int getNumSymbols() { return 1; }
     static Hz getBandwidth() { return kHz(15); }
     static simtime_t getDuration() { return (double)(2048 + 144) / 30720000; }
-    b getLength() const { return b(modulation.getCodeWordSize()); }
-    Ptr<const Chunk> getContent() const { return contents; }
-    void setContent(Ptr<const Chunk> contents) { this->contents = contents; }
+
+    b getLength() const { return B(1); } // TODO: b(modulation->getCodeWordSize()); }
+    Ptr<const Chunk> getContent() const { return content; }
+    void setContent(Ptr<const Chunk> content) { this->content = content; }
 };
 
 /**
@@ -54,17 +61,22 @@ class ResourceBlock {
   protected:
     int numSymbols = 7; // either 7 or 6
     std::vector<ResourceElement> resourceElements; // this level of detail could be optional
-    Ptr<const Chunk> contents;
+    Ptr<const Chunk> content;
 
   public:
+    ResourceBlock() { resourceElements.resize(getNumResourceElements()); }
+    ResourceBlock(const ResourceBlock& other) { resourceElements = other.resourceElements; }
+    void operator=(const ResourceBlock& other) { resourceElements = other.resourceElements; }
+
     static int getNumSubcarriers() { return 12; }
     static Hz getBandwidth() { return ResourceElement::getBandwidth() * getNumSubcarriers(); }
+
     int getNumSymbols() const { return numSymbols; }
     int getNumResourceElements() const { return getNumSubcarriers() * getNumSymbols(); }
     ResourceElement& getResourceElement(int index) { return resourceElements[index]; }
     simtime_t getDuration() const { return getNumSymbols() * ResourceElement::getDuration() + (double)(160 - 144) / 30720000; }
-    Ptr<const Chunk> getContent() const { return contents; }
-    void setContent(Ptr<const Chunk> contents) { this->contents = contents; }
+    Ptr<const Chunk> getContent() const { return content; }
+    void setContent(Ptr<const Chunk> content) { this->content = content; }
 };
 
 /**
@@ -75,34 +87,43 @@ class Slot {
     int numSubcarriers = 2048; // from 128 to 2048
     int numOccupiedSubcarriers = 1200; // from 76 to 1200
     std::vector<ResourceBlock> resourceBlocks;
-    Ptr<const Chunk> contents; // this aggregate could be optional
+    Ptr<const Chunk> content; // this aggregate could be optional
 
   public:
+    Slot() { resourceBlocks.resize(getNumResourceBlocks()); }
+    Slot(const Slot& other) { resourceBlocks = other.resourceBlocks; }
+    void operator=(const Slot& other) { resourceBlocks = other.resourceBlocks; }
+
     int getNumSubcarriers() const { return numSubcarriers; }
     int getNumOccupiedSubcarriers() const { return numOccupiedSubcarriers; }
     int getNumGuardSubcarriers() const { return numSubcarriers - numOccupiedSubcarriers; }
     int getNumResourceBlocks() const { return numOccupiedSubcarriers / ResourceBlock::getNumSubcarriers(); }
     ResourceBlock& getResourceBlock(int index) { return resourceBlocks[index]; }
     simtime_t getDuration() const { return 5E-4; }
-    Ptr<const Chunk> getContent() const { return contents; }
-    void setContent(Ptr<const Chunk> contents) { this->contents = contents; }
+    Ptr<const Chunk> getContent() const { return content; }
+    void setContent(Ptr<const Chunk> content) { this->content = content; }
 };
 
 /**
  * Represents multiple slots.
  */
-class Subframe : public Packet {
+class Subframe {
   protected:
     static constexpr int numSlots = 2;
     Slot slots[numSlots];
-    Ptr<const Chunk> contents; // this aggregate could be optional
+    Ptr<const Chunk> content; // this aggregate could be optional
 
   public:
+    Subframe() {}
+    Subframe(const Subframe& other) { for (int i = 0; i < numSlots; i++) slots[i] = other.slots[i]; }
+    void operator=(const Subframe& other) { for (int i = 0; i < numSlots; i++) slots[i] = other.slots[i]; }
+
     static int getNumSlots() { return numSlots; }
+
     Slot& getSlot(int index) { return slots[index]; }
     simtime_t getDuration() const { return 1E-3; }
-    Ptr<const Chunk> getContent() const { return contents; }
-    void setContent(Ptr<const Chunk> contents) { this->contents = contents; }
+    Ptr<const Chunk> getContent() const { return content; }
+    void setContent(Ptr<const Chunk> content) { this->content = content; }
 };
 
 /**
@@ -112,14 +133,19 @@ class Frame : public Packet {
   protected:
     static constexpr int numSubframes = 10;
     Subframe subframes[numSubframes];
-    Ptr<const Chunk> contents; // this aggregate could be optional
 
   public:
+    Frame() { setDuration(10E-3); }
+    Frame(const Frame& other) : Packet(other) { for (int i = 0; i < numSubframes; i++) subframes[i] = other.subframes[i]; }
+    Frame(const char *name, const Ptr<const Chunk>& content) : Packet(name, content) { setDuration(10E-3); }
+    void operator=(const Frame& other) { Packet::operator=(other); for (int i = 0; i < numSubframes; i++) subframes[i] = other.subframes[i]; }
+
+    virtual Frame *dup() const override { return new Frame(*this); }
+
     static int getNumSubframes() { return numSubframes; }
+
     Subframe& getSubframe(int index) { return subframes[index]; }
-    simtime_t getDuration() const { return 10E-3; }
-    Ptr<const Chunk> getContent() const { return contents; }
-    void setContent(Ptr<const Chunk> contents) { this->contents = contents; }
+    void setContent(Ptr<const Chunk> content) { removeAll(); insertAtBack(content); }
 };
 
 /**
@@ -135,10 +161,16 @@ class AllocatedResourceBlock {
 /**
  * Implements the INET transmission.
  */
-class LteTransmission : public TransmissionBase {
+class LteTransmission : public NarrowbandTransmissionBase, public IScalarSignal {
+  protected:
+    W power;
+
   public:
     LteTransmission(const IRadio *transmitter, const Packet *packet, const simtime_t startTime, const simtime_t endTime, const Coord startPosition, const Coord endPosition, const EulerAngles startOrientation, const EulerAngles endOrientation) :
-        TransmissionBase(transmitter, packet, startTime, endTime, 0, 0, startTime - endTime, startPosition, endPosition, startOrientation, endOrientation) {}
+        NarrowbandTransmissionBase(transmitter, packet, startTime, endTime, 0, 0, startTime - endTime, startPosition, endPosition, startOrientation, endOrientation, nullptr, Hz(NaN), Hz(NaN)) {}
+
+    virtual W computeMinPower(simtime_t startTime, simtime_t endTime) const { return power; }
+    virtual W getPower() const override { return power; }
 };
 
 /**
@@ -153,6 +185,10 @@ class LteTransmitter : public TransmitterBase {
  * Implements the INET receiver.
  */
 class LteReceiver : public ReceiverBase {
+  public:
+    virtual const IListening *createListening(const IRadio *radio, const simtime_t startTime, const simtime_t endTime, const Coord startPosition, const Coord endPosition) const override;
+    virtual const IListeningDecision *computeListeningDecision(const IListening *listening, const IInterference *interference) const override;
+    virtual bool computeIsReceptionSuccessful(const IListening *listening, const IReception *reception, IRadioSignal::SignalPart part, const IInterference *interference, const ISnir *snir) const override;
 };
 
 /**
@@ -169,8 +205,17 @@ class LteErrorModel : public ErrorModelBase {
  */
 class LteRadio : public Radio {
   protected:
+    std::vector<AllocatedResourceBlock> allocatedResourceBlocks;
+
+  public:
+    LteRadio();
+
+  protected:
+    virtual void handleUpperPacket(Packet *packet) override;
+    virtual void sendUp(Packet *packet) override;
+
     /**
-     * Inserts a part of the packet's contents into the resource blocks of the given frame according to the allocation.
+     * Inserts a part of the packet's content into the resource blocks of the given frame according to the allocation.
      */
     void insertPacketIntoFrame(const Packet& packet, b offset, b length, Frame& frame, const std::vector<AllocatedResourceBlock>& allocatedResourceBlocks);
 
@@ -183,16 +228,6 @@ class LteRadio : public Radio {
      * Computes all frame, subframe, slot, and resource block contents based on resource element contents.
      */
     void computeFrameContent(Frame& frame);
-
-    /**
-     * Transmits a whole frame as a single wireless signal using the radio over the radio medium.
-     */
-    void transmitFrameSignal(Frame& frame);
-
-    /**
-     * Transmits one subframe as a single wireless signal using the radio over the radio medium.
-     */
-    void transmitSubframeSignal(Frame& frame, int subframeIndex);
 };
 
 } // namespace lte

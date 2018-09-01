@@ -14,9 +14,17 @@
 //
 
 #include "inet/common/packet/chunk/SequenceChunk.h"
+#include "inet/common/ProtocolTag_m.h"
+#include "inet/physicallayer/common/packetlevel/BandListening.h"
+#include "inet/physicallayer/common/packetlevel/ListeningDecision.h"
 #include "Phy.h"
 
 namespace lte {
+
+Define_Module(LteTransmitter);
+Define_Module(LteReceiver);
+Define_Module(LteRadio);
+Protocol lte("lte", "LTE");
 
 const ITransmission *LteTransmitter::createTransmission(const IRadio *transmitter, const Packet *packet, const simtime_t startTime) const
 {
@@ -29,17 +37,63 @@ const ITransmission *LteTransmitter::createTransmission(const IRadio *transmitte
     return new LteTransmission(transmitter, packet, startTime, endTime, startPosition, endPosition, startOrientation, endOrientation);
 }
 
+const IListening *LteReceiver::createListening(const IRadio *radio, const simtime_t startTime, const simtime_t endTime, const Coord startPosition, const Coord endPosition) const
+{
+    return new BandListening(radio, startTime, endTime, startPosition, endPosition, Hz(NaN), Hz(NaN));
+}
+
+const IListeningDecision *LteReceiver::computeListeningDecision(const IListening *listening, const IInterference *interference) const
+{
+    return new ListeningDecision(listening, true);
+}
+
+bool LteReceiver::computeIsReceptionSuccessful(const IListening *listening, const IReception *reception, IRadioSignal::SignalPart part, const IInterference *interference, const ISnir *snir) const
+{
+    return true;
+}
+
+LteRadio::LteRadio()
+{
+    // NOTE: generate fake allocation, this should be done somewhere else
+    for (int i = 0; i < 100; i++) {
+        AllocatedResourceBlock allocatedResourceBlock;
+        allocatedResourceBlock.subframeIndex = 0;
+        allocatedResourceBlock.slotIndex = 0;
+        allocatedResourceBlock.resourceBlockIndex = i;
+        allocatedResourceBlocks.push_back(allocatedResourceBlock);
+    }
+}
+
+void LteRadio::handleUpperPacket(Packet *packet)
+{
+    auto frame = new Frame();
+    frame->setName("LteFrame");
+    frame->addTag<PacketProtocolTag>()->setProtocol(&lte);
+    insertPacketIntoFrame(*packet, b(0), packet->getTotalLength(), *frame, allocatedResourceBlocks);
+    delete packet;
+    computeFrameContent(*frame);
+    Radio::handleUpperPacket(frame);
+}
+
+void LteRadio::sendUp(Packet *packet)
+{
+    auto frame = check_and_cast<Frame *>(packet);
+    packet = extractPacketFromFrame(*frame, allocatedResourceBlocks);
+    Radio::sendUp(packet);
+    delete frame;
+}
+
 void LteRadio::insertPacketIntoFrame(const Packet& packet, b offset, b length, Frame& frame, const std::vector<AllocatedResourceBlock>& allocatedResourceBlocks)
 {
     for (auto allocatedResourceBlock : allocatedResourceBlocks) {
-        auto subframe = frame.getSubframe(allocatedResourceBlock.subframeIndex);
-        auto slot = subframe.getSlot(allocatedResourceBlock.slotIndex);
-        auto resourceBlock = slot.getResourceBlock(allocatedResourceBlock.resourceBlockIndex);
+        auto& subframe = frame.getSubframe(allocatedResourceBlock.subframeIndex);
+        auto& slot = subframe.getSlot(allocatedResourceBlock.slotIndex);
+        auto& resourceBlock = slot.getResourceBlock(allocatedResourceBlock.resourceBlockIndex);
         for (int i = 0; i < resourceBlock.getNumResourceElements(); i++) {
-            auto resourceElement = resourceBlock.getResourceElement(i);
+            auto& resourceElement = resourceBlock.getResourceElement(i);
             auto resourceElementLength = resourceElement.getLength();
-            auto contents = packet.peekAt(offset, resourceElementLength);
-            resourceElement.setContent(contents);
+            auto content = packet.peekAt(offset, resourceElementLength);
+            resourceElement.setContent(content);
             offset += resourceElementLength;
             length -= resourceElementLength;
             if (length == b(0))
@@ -50,14 +104,16 @@ void LteRadio::insertPacketIntoFrame(const Packet& packet, b offset, b length, F
 
 Packet *LteRadio::extractPacketFromFrame(Frame& frame, const std::vector<AllocatedResourceBlock>& allocatedResourceBlocks)
 {
-    auto packet = new Packet("LTE");
+    auto packet = new Packet("LtePacket");
     for (auto allocatedResourceBlock : allocatedResourceBlocks) {
-        auto subframe = frame.getSubframe(allocatedResourceBlock.subframeIndex);
-        auto slot = subframe.getSlot(allocatedResourceBlock.slotIndex);
-        auto resourceBlock = slot.getResourceBlock(allocatedResourceBlock.resourceBlockIndex);
+        auto& subframe = frame.getSubframe(allocatedResourceBlock.subframeIndex);
+        auto& slot = subframe.getSlot(allocatedResourceBlock.slotIndex);
+        auto& resourceBlock = slot.getResourceBlock(allocatedResourceBlock.resourceBlockIndex);
         for (int i = 0; i < resourceBlock.getNumResourceElements(); i++) {
-            auto resourceElement = resourceBlock.getResourceElement(i);
-            packet->insertAtBack(resourceElement.getContent());
+            auto& resourceElement = resourceBlock.getResourceElement(i);
+            const auto& content = resourceElement.getContent();
+            if (content != nullptr)
+                packet->insertAtBack(content);
         }
     }
     return packet;
@@ -67,17 +123,19 @@ void LteRadio::computeFrameContent(Frame& frame)
 {
     auto frameContent = makeShared<SequenceChunk>();
     for (int i = 0; i < frame.getNumSubframes(); i++) {
-        auto subframe = frame.getSubframe(i);
+        auto& subframe = frame.getSubframe(i);
         auto subframeContent = makeShared<SequenceChunk>();
         for (int j = 0; j < subframe.getNumSlots(); j++) {
-            auto slot = subframe.getSlot(j);
+            auto& slot = subframe.getSlot(j);
             auto slotContent = makeShared<SequenceChunk>();
             for (int k = 0; k < slot.getNumResourceBlocks(); k++) {
-                auto resourceBlock = slot.getResourceBlock(k);
+                auto& resourceBlock = slot.getResourceBlock(k);
                 auto resourceBlockContent = makeShared<SequenceChunk>();
                 for (int l = 0; l < resourceBlock.getNumResourceElements(); l++) {
-                    auto resourceElement = resourceBlock.getResourceElement(l);
-                    resourceBlockContent->insertAtBack(resourceElement.getContent());
+                    auto& resourceElement = resourceBlock.getResourceElement(l);
+                    const auto& content = resourceElement.getContent();
+                    if (content != nullptr)
+                        resourceBlockContent->insertAtBack(content);
                 }
                 resourceBlock.setContent(resourceBlockContent);
                 slotContent->insertAtBack(resourceBlockContent);
@@ -89,17 +147,6 @@ void LteRadio::computeFrameContent(Frame& frame)
         frameContent->insertAtBack(subframeContent);
     }
     frame.setContent(frameContent);
-}
-
-void LteRadio::transmitFrameSignal(Frame& frame)
-{
-    startTransmission(&frame, IRadioSignal::SIGNAL_PART_WHOLE);
-}
-
-void LteRadio::transmitSubframeSignal(Frame& frame, int subframeIndex)
-{
-    auto subframe = frame.getSubframe(subframeIndex);
-    startTransmission(&subframe, IRadioSignal::SIGNAL_PART_WHOLE);
 }
 
 } // namespace lte
