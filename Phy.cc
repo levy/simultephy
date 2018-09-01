@@ -66,7 +66,7 @@ LteRadio::LteRadio()
 
 void LteRadio::handleUpperPacket(Packet *packet)
 {
-    auto frame = new Frame();
+    auto frame = new Frame(mode, levelOfDetail);
     frame->setName("LteFrame");
     frame->addTag<PacketProtocolTag>()->setProtocol(&lte);
     insertPacketIntoFrame(*packet, b(0), packet->getTotalLength(), *frame, allocatedResourceBlocks);
@@ -89,17 +89,39 @@ void LteRadio::insertPacketIntoFrame(const Packet& packet, b offset, b length, F
         auto& subframe = frame.getSubframe(allocatedResourceBlock.subframeIndex);
         auto& slot = subframe.getSlot(allocatedResourceBlock.slotIndex);
         auto& resourceBlock = slot.getResourceBlock(allocatedResourceBlock.resourceBlockIndex);
-        for (int i = 0; i < resourceBlock.getNumResourceElements(); i++) {
-            auto& resourceElement = resourceBlock.getResourceElement(i);
-            auto resourceElementLength = resourceElement.getLength();
-            auto content = packet.peekAt(offset, resourceElementLength);
-            resourceElement.setContent(content);
-            offset += resourceElementLength;
-            length -= resourceElementLength;
-            if (length == b(0))
-                return;
+        switch (levelOfDetail) {
+            case LevelOfDetail::RESOURCE_BLOCK: {
+                auto peekLength = mode.getResourceBlockLength();
+                if (peekLength > length)
+                    peekLength = length;
+                auto content = packet.peekAt(offset, peekLength);
+                resourceBlock.setContent(content);
+                offset += peekLength;
+                length -= peekLength;
+                if (length == b(0))
+                    return;
+                break;
+            }
+            case LevelOfDetail::RESOURCE_ELEMENT: {
+                for (int i = 0; i < mode.getNumResourceElementsPerResourceBlock(); i++) {
+                    auto& resourceElement = resourceBlock.getResourceElement(i);
+                    auto peekLength = mode.getResourceElementLength();
+                    if (peekLength > length)
+                        peekLength = length;
+                    auto content = packet.peekAt(offset, peekLength);
+                    resourceElement.setContent(content);
+                    offset += peekLength;
+                    length -= peekLength;
+                    if (length == b(0))
+                        return;
+                }
+                break;
+            }
+            default:
+                throw cRuntimeError("Unknown level of detail");
         }
     }
+    throw cRuntimeError("Insufficient space");
 }
 
 Packet *LteRadio::extractPacketFromFrame(Frame& frame, const std::vector<AllocatedResourceBlock>& allocatedResourceBlocks)
@@ -109,11 +131,24 @@ Packet *LteRadio::extractPacketFromFrame(Frame& frame, const std::vector<Allocat
         auto& subframe = frame.getSubframe(allocatedResourceBlock.subframeIndex);
         auto& slot = subframe.getSlot(allocatedResourceBlock.slotIndex);
         auto& resourceBlock = slot.getResourceBlock(allocatedResourceBlock.resourceBlockIndex);
-        for (int i = 0; i < resourceBlock.getNumResourceElements(); i++) {
-            auto& resourceElement = resourceBlock.getResourceElement(i);
-            const auto& content = resourceElement.getContent();
-            if (content != nullptr)
-                packet->insertAtBack(content);
+        switch (levelOfDetail) {
+            case LevelOfDetail::RESOURCE_BLOCK: {
+                const auto& content = resourceBlock.getContent();
+                if (content != nullptr)
+                    packet->insertAtBack(content);
+                break;
+            }
+            case LevelOfDetail::RESOURCE_ELEMENT: {
+                for (int i = 0; i < mode.getNumResourceElementsPerResourceBlock(); i++) {
+                    auto& resourceElement = resourceBlock.getResourceElement(i);
+                    const auto& content = resourceElement.getContent();
+                    if (content != nullptr)
+                        packet->insertAtBack(content);
+                }
+                break;
+            }
+            default:
+                throw cRuntimeError("Unknown level of detail");
         }
     }
     return packet;
@@ -122,23 +157,30 @@ Packet *LteRadio::extractPacketFromFrame(Frame& frame, const std::vector<Allocat
 void LteRadio::computeFrameContent(Frame& frame)
 {
     auto frameContent = makeShared<SequenceChunk>();
-    for (int i = 0; i < frame.getNumSubframes(); i++) {
+    for (int i = 0; i < mode.getNumSubframesPerFrame(); i++) {
         auto& subframe = frame.getSubframe(i);
         auto subframeContent = makeShared<SequenceChunk>();
-        for (int j = 0; j < subframe.getNumSlots(); j++) {
+        for (int j = 0; j < mode.getNumSlotsPerSubframe(); j++) {
             auto& slot = subframe.getSlot(j);
             auto slotContent = makeShared<SequenceChunk>();
-            for (int k = 0; k < slot.getNumResourceBlocks(); k++) {
+            for (int k = 0; k < mode.getNumResourceBlocksPerSlot(); k++) {
                 auto& resourceBlock = slot.getResourceBlock(k);
-                auto resourceBlockContent = makeShared<SequenceChunk>();
-                for (int l = 0; l < resourceBlock.getNumResourceElements(); l++) {
-                    auto& resourceElement = resourceBlock.getResourceElement(l);
-                    const auto& content = resourceElement.getContent();
-                    if (content != nullptr)
-                        resourceBlockContent->insertAtBack(content);
+                if (levelOfDetail > LevelOfDetail::RESOURCE_BLOCK) {
+                    auto resourceBlockContent = makeShared<SequenceChunk>();
+                    for (int l = 0; l < mode.getNumResourceElementsPerResourceBlock(); l++) {
+                        auto& resourceElement = resourceBlock.getResourceElement(l);
+                        const auto& content = resourceElement.getContent();
+                        if (content != nullptr)
+                            resourceBlockContent->insertAtBack(content);
+                    }
+                    resourceBlock.setContent(resourceBlockContent);
+                    slotContent->insertAtBack(resourceBlockContent);
                 }
-                resourceBlock.setContent(resourceBlockContent);
-                slotContent->insertAtBack(resourceBlockContent);
+                else {
+                    const auto& content = resourceBlock.getContent();
+                    if (content != nullptr)
+                        slotContent->insertAtBack(content);
+                }
             }
             slot.setContent(slotContent);
             subframeContent->insertAtBack(slotContent);

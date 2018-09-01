@@ -31,25 +31,62 @@ namespace lte {
 using namespace inet;
 using namespace inet::physicallayer;
 
+enum class LevelOfDetail {
+//    FRAME,
+//    SUBFRAME,
+//    SLOT,
+    RESOURCE_BLOCK,
+    RESOURCE_ELEMENT
+};
+
+class LteMode {
+  protected:
+    const int numSubframesPerFrame = 10;
+    const int numSlotsPerSubframe = 2;
+    const int numSubcarriersPerSlot = 2048; // from 128 to 2048
+    const int numOccupiedSubcarriersPerSlot = 1200; // from 76 to 1200
+    const int numSymbolsPerResourceBlock = 7; // either 7 or 6
+    const int numSubcarriersPerResourceBlock = 12;
+    const IApskModulation &subcarrierModulation = Qam64Modulation::singleton; // QPSK, QAM-16, or QAM-64
+
+  public:
+    int getNumSubframesPerFrame() const { return numSubframesPerFrame; }
+    int getNumSlotsPerSubframe() const { return numSlotsPerSubframe; }
+    int getNumSubcarriersPerSlot() const { return numSubcarriersPerSlot; }
+    int getNumOccupiedSubcarriersPerSlot() const { return numOccupiedSubcarriersPerSlot; }
+    int getNumSymbolsPerResourceBlock() const { return numSymbolsPerResourceBlock; }
+    int getNumSubcarriersPerResourceBlock() const { return numSubcarriersPerResourceBlock; }
+    int getNumResourceBlocksPerSlot() const { return getNumOccupiedSubcarriersPerSlot() / getNumSubcarriersPerResourceBlock(); }
+    int getNumResourceElementsPerResourceBlock() const { return getNumSubcarriersPerResourceBlock() * getNumSymbolsPerResourceBlock(); }
+
+    b getFrameLength() const { return getSubframeLength() * getNumSubframesPerFrame(); }
+    b getSubframeLength() const { return getSlotLength() * getNumSlotsPerSubframe(); }
+    b getSlotLength() const { return getResourceBlockLength() * getNumResourceBlocksPerSlot(); }
+    b getResourceBlockLength() const { return getResourceElementLength() * getNumResourceElementsPerResourceBlock(); }
+    b getResourceElementLength() const { return B(1); } // return b(subcarrierModulation.getCodeWordSize()); }
+
+    simtime_t getResourceElementDuration() const { return (double)(2048 + 144) / 30720000; }
+    simtime_t getResourceBlockDuration() const { return getNumSymbolsPerResourceBlock() * getResourceElementDuration() + (double)(160 - 144) / 30720000; }
+    simtime_t getSlotDuration() const { return 5E-4; }
+    simtime_t getSubframeDuration() const { return 1E-3; }
+    simtime_t getFrameDuration() const { return 10E-3; }
+};
+
 /**
  * Represents one OFDM symbol using one subcarrier.
  */
 class ResourceElement {
   protected:
-    // const IApskModulation &modulation = Qam64Modulation::singleton; // QPSK, QAM-16, or QAM-64
-    Ptr<const Chunk> content; // this level of detail could be optional
+    Ptr<const Chunk> content; // this level of detail is optional
 
   public:
-    ResourceElement() {}
-    ResourceElement(const ResourceElement& other) { /*modulation = other.modulation;*/ content = other.content; }
+    const Chunk *getContentPtr() { return content.get(); } // only for class descriptor
+
+  public:
+    ResourceElement(LevelOfDetail levelOfDetail) { ASSERT(levelOfDetail == LevelOfDetail::RESOURCE_ELEMENT); }
+    ResourceElement(const ResourceElement& other) { content = other.content; }
     void operator=(const ResourceElement& other) { content = other.content; }
 
-    static int getNumSubcarriers() { return 1; }
-    static int getNumSymbols() { return 1; }
-    static Hz getBandwidth() { return kHz(15); }
-    static simtime_t getDuration() { return (double)(2048 + 144) / 30720000; }
-
-    b getLength() const { return B(1); } // TODO: b(modulation->getCodeWordSize()); }
     Ptr<const Chunk> getContent() const { return content; }
     void setContent(Ptr<const Chunk> content) { this->content = content; }
 };
@@ -59,22 +96,19 @@ class ResourceElement {
  */
 class ResourceBlock {
   protected:
-    int numSymbols = 7; // either 7 or 6
-    std::vector<ResourceElement> resourceElements; // this level of detail could be optional
+    std::vector<ResourceElement> resourceElements; // this level of detail is optional
     Ptr<const Chunk> content;
 
   public:
-    ResourceBlock() { resourceElements.resize(getNumResourceElements()); }
-    ResourceBlock(const ResourceBlock& other) { resourceElements = other.resourceElements; }
-    void operator=(const ResourceBlock& other) { resourceElements = other.resourceElements; }
+    const Chunk *getContentPtr() { return content.get(); } // only for class descriptor
+    int getResourceElementsArraySize() const { return resourceElements.size(); } // only for class descriptor
 
-    static int getNumSubcarriers() { return 12; }
-    static Hz getBandwidth() { return ResourceElement::getBandwidth() * getNumSubcarriers(); }
+  public:
+    ResourceBlock(LteMode& mode, LevelOfDetail levelOfDetail) { if (levelOfDetail > LevelOfDetail::RESOURCE_BLOCK) for (int i = 0; i < mode.getNumResourceElementsPerResourceBlock(); i++) resourceElements.push_back(ResourceElement(levelOfDetail)); }
+    ResourceBlock(const ResourceBlock& other) { content = other.content; resourceElements = other.resourceElements; }
+    void operator=(const ResourceBlock& other) { content = other.content; resourceElements = other.resourceElements; }
 
-    int getNumSymbols() const { return numSymbols; }
-    int getNumResourceElements() const { return getNumSubcarriers() * getNumSymbols(); }
     ResourceElement& getResourceElement(int index) { return resourceElements[index]; }
-    simtime_t getDuration() const { return getNumSymbols() * ResourceElement::getDuration() + (double)(160 - 144) / 30720000; }
     Ptr<const Chunk> getContent() const { return content; }
     void setContent(Ptr<const Chunk> content) { this->content = content; }
 };
@@ -84,22 +118,19 @@ class ResourceBlock {
  */
 class Slot {
   protected:
-    int numSubcarriers = 2048; // from 128 to 2048
-    int numOccupiedSubcarriers = 1200; // from 76 to 1200
     std::vector<ResourceBlock> resourceBlocks;
-    Ptr<const Chunk> content; // this aggregate could be optional
+    Ptr<const Chunk> content; // this aggregate is optional
 
   public:
-    Slot() { resourceBlocks.resize(getNumResourceBlocks()); }
-    Slot(const Slot& other) { resourceBlocks = other.resourceBlocks; }
-    void operator=(const Slot& other) { resourceBlocks = other.resourceBlocks; }
+    const Chunk *getContentPtr() { return content.get(); } // only for class descriptor
+    int getResourceBlocksArraySize() const { return resourceBlocks.size(); } // only for class descriptor
 
-    int getNumSubcarriers() const { return numSubcarriers; }
-    int getNumOccupiedSubcarriers() const { return numOccupiedSubcarriers; }
-    int getNumGuardSubcarriers() const { return numSubcarriers - numOccupiedSubcarriers; }
-    int getNumResourceBlocks() const { return numOccupiedSubcarriers / ResourceBlock::getNumSubcarriers(); }
+  public:
+    Slot(LteMode& mode, LevelOfDetail levelOfDetail) { for (int i = 0; i < mode.getNumResourceBlocksPerSlot(); i++) resourceBlocks.push_back(ResourceBlock(mode, levelOfDetail)); }
+    Slot(const Slot& other) { content = other.content; resourceBlocks = other.resourceBlocks; }
+    void operator=(const Slot& other) { content = other.content; resourceBlocks = other.resourceBlocks; }
+
     ResourceBlock& getResourceBlock(int index) { return resourceBlocks[index]; }
-    simtime_t getDuration() const { return 5E-4; }
     Ptr<const Chunk> getContent() const { return content; }
     void setContent(Ptr<const Chunk> content) { this->content = content; }
 };
@@ -109,19 +140,19 @@ class Slot {
  */
 class Subframe {
   protected:
-    static constexpr int numSlots = 2;
-    Slot slots[numSlots];
-    Ptr<const Chunk> content; // this aggregate could be optional
+    std::vector<Slot> slots;
+    Ptr<const Chunk> content; // this aggregate is optional
 
   public:
-    Subframe() {}
-    Subframe(const Subframe& other) { for (int i = 0; i < numSlots; i++) slots[i] = other.slots[i]; }
-    void operator=(const Subframe& other) { for (int i = 0; i < numSlots; i++) slots[i] = other.slots[i]; }
+    const Chunk *getContentPtr() { return content.get(); } // only for class descriptor
+    int getSlotsArraySize() const { return slots.size(); } // only for class descriptor
 
-    static int getNumSlots() { return numSlots; }
+  public:
+    Subframe(LteMode& mode, LevelOfDetail levelOfDetail) { for (int i = 0; i < mode.getNumSlotsPerSubframe(); i++) slots.push_back(Slot(mode, levelOfDetail)); }
+    Subframe(const Subframe& other) { content = other.content; slots = other.slots; }
+    void operator=(const Subframe& other) { content = other.content; slots = other.slots; }
 
     Slot& getSlot(int index) { return slots[index]; }
-    simtime_t getDuration() const { return 1E-3; }
     Ptr<const Chunk> getContent() const { return content; }
     void setContent(Ptr<const Chunk> content) { this->content = content; }
 };
@@ -131,20 +162,21 @@ class Subframe {
  */
 class Frame : public Packet {
   protected:
-    static constexpr int numSubframes = 10;
-    Subframe subframes[numSubframes];
+    std::vector<Subframe> subframes;
 
   public:
-    Frame() { setDuration(10E-3); }
-    Frame(const Frame& other) : Packet(other) { for (int i = 0; i < numSubframes; i++) subframes[i] = other.subframes[i]; }
+    int getSubframesArraySize() const { return subframes.size(); } // only for class descriptor
+
+  public:
+    Frame(LteMode& mode, LevelOfDetail levelOfDetail) { for (int i = 0; i < mode.getNumSubframesPerFrame(); i++) subframes.push_back(Subframe(mode, levelOfDetail)); setDuration(10E-3); }
+    Frame(const Frame& other) : Packet(other) { subframes = other.subframes; }
     Frame(const char *name, const Ptr<const Chunk>& content) : Packet(name, content) { setDuration(10E-3); }
-    void operator=(const Frame& other) { Packet::operator=(other); for (int i = 0; i < numSubframes; i++) subframes[i] = other.subframes[i]; }
+    void operator=(const Frame& other) { Packet::operator=(other); subframes = other.subframes; }
 
     virtual Frame *dup() const override { return new Frame(*this); }
 
-    static int getNumSubframes() { return numSubframes; }
-
     Subframe& getSubframe(int index) { return subframes[index]; }
+    Ptr<const Chunk> getContent() const { return peekAll(); }
     void setContent(Ptr<const Chunk> content) { removeAll(); insertAtBack(content); }
 };
 
@@ -153,9 +185,9 @@ class Frame : public Packet {
  */
 class AllocatedResourceBlock {
   public:
-    int subframeIndex;
-    int slotIndex;
-    int resourceBlockIndex;
+    int subframeIndex = -1;
+    int slotIndex = -1;
+    int resourceBlockIndex = -1;
 };
 
 /**
@@ -205,6 +237,8 @@ class LteErrorModel : public ErrorModelBase {
  */
 class LteRadio : public Radio {
   protected:
+    LteMode mode;
+    LevelOfDetail levelOfDetail = LevelOfDetail::RESOURCE_BLOCK;
     std::vector<AllocatedResourceBlock> allocatedResourceBlocks;
 
   public:
